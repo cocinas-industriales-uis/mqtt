@@ -1,0 +1,5 @@
+# Dependencias del módulo MQTT
+# Instalar: pip install -r requirements.txt
+
+paho-mqtt==1.6.1        # Cliente MQTT para Python
+django>=4.2             # Ya instalado en el backend
