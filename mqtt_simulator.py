@@ -22,7 +22,6 @@ import random
 import argparse
 import logging
 import signal
-import paho.mqtt.client as mqtt
 
 # ── Logging ───────────────────────────────────────────────────────
 logging.basicConfig(
@@ -160,6 +159,7 @@ class CocinaVirtual:
             "valvula":               valvula,
             "aspersor":              aspersor,
             "confirmando":           False,
+            "sensor_ok":             True,
             "cocina_id":             self.id,
             "escenario":             list(ESCENARIOS.keys())[
                                        list(ESCENARIOS.values()).index(self.escenario)
@@ -212,7 +212,10 @@ class Publicador:
         self.intervalo = intervalo
         self.corriendo = True
 
+        import paho.mqtt.client as mqtt   # paho-mqtt 1.x; import tardío para poder probar CocinaVirtual sin paho
         self.client = mqtt.Client(client_id="simulator", clean_session=True)
+        if os.getenv("MQTT_USER"):
+            self.client.username_pw_set(os.getenv("MQTT_USER"), os.getenv("MQTT_PASSWORD", ""))
         self.client.on_connect = self._on_connect
 
     def _on_connect(self, client, userdata, flags, rc):

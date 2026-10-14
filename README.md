@@ -12,7 +12,7 @@ ESP32 (publisher)
     ▼
 Mosquitto (broker) ← localhost:1883
     │
-    ├── mqtt_client.py     → guarda lecturas en Django
+    ├── mqtt_client.py     → valida (payload.py) y guarda lecturas en Django
     └── mqtt_simulator.py  → genera cocinas virtuales
 ```
 
@@ -52,9 +52,13 @@ Cada mensaje publicado en el broker tiene este formato:
   "valvula":               false,
   "aspersor":              false,
   "confirmando":           false,
+  "sensor_ok":             true,
   "ts":                    183420
 }
 ```
+
+> `valvula=true` significa válvula **cerrada**. La temperatura válida es −55..300 °C; `gas_raw` y `presion_raw` 0..4095.
+> Los mensajes que no cumplen tipos/rangos se **rechazan y se registran** sin detener el suscriptor (`payload.py`).
 
 ### Campos clave
 
@@ -67,7 +71,8 @@ Cada mensaje publicado en el broker tiene este formato:
 | `delta_t` | float | °C/s — velocidad de cambio de temperatura |
 | `prioridad` | int | 0–9 según la lógica del firmware |
 | `confirmando` | bool | `true` = condición detectada, aún sin confirmar |
-| `ts` | int | millis() desde arranque del ESP32 |
+| `sensor_ok` | bool | `false` = NTC averiado: `temperatura` (0) no es una medida. Opcional (firmware antiguo no lo envía → `true`) |
+| `ts` | int | millis() desde arranque del ESP32 (**no es hora real**; la hora de la lectura es la de recepción en el servidor) |
 
 ---
 
@@ -114,11 +119,19 @@ pip install -r requirements.txt
 
 ### 3. Correr el suscriptor Django
 
+Requiere el entorno del backend (Django y sus dependencias) activo. `SERVIDOR_DIR` apunta a la carpeta del repo
+`servidor` (por defecto `../servidor`, es decir, los repos clonados uno junto al otro):
+
 ```bash
-cd Backend_cocina/
-source venv/bin/activate
-python cocina/mqtt_client.py
+cd mqtt/
+source ../servidor/venv/bin/activate        # o el entorno donde instaló el backend
+SERVIDOR_DIR=../servidor python mqtt_client.py
 ```
+
+Opcional: `MQTT_USER` / `MQTT_PASSWORD` si el broker exige autenticación (el firmware aún no la soporta).
+
+> **Estado:** el modelo `Lectura` de `servidor/` todavía no tiene los campos de este contrato (Fase 3 de la auditoría);
+> hasta entonces el suscriptor valida pero la escritura en BD fallará y quedará registrada en el log.
 
 ### 4. Probar con el simulador
 
@@ -146,17 +159,17 @@ python mqtt_simulator.py --listar
 sudo systemctl start mosquitto
 
 # Terminal 2 — suscriptor
-cd Backend_cocina && source venv/bin/activate
-python cocina/mqtt_client.py
+cd mqtt && source ../servidor/venv/bin/activate
+SERVIDOR_DIR=../servidor python mqtt_client.py
 
 # Terminal 3 — backend Django
-python manage.py runserver
+cd servidor && python manage.py runserver
 
 # Terminal 4 — simulador (opcional, sin hardware físico)
 cd mqtt && python mqtt_simulator.py --cocinas 5
 
 # Terminal 5 — frontend
-cd frontend/cocina-frontend && npm run dev
+cd pagina-web && npm run dev
 ```
 
 ---
@@ -175,11 +188,25 @@ cd frontend/cocina-frontend && npm run dev
 
 ---
 
+## Pruebas
+
+```bash
+# Sin broker, sin paho y sin Django: contrato con el firmware real, mensajes malformados, simulador
+python -m unittest test_offline -v
+
+# Con broker Mosquitto en marcha (prueba el broker y la red, no el código del proyecto)
+python mqtt_test.py
+```
+
+`test_data/firmware_payloads.jsonl` contiene payloads generados por el firmware real (`esp32/test_host`, escenario `DUMP`).
+
 ## Variables de entorno
 
 ```bash
 export MQTT_BROKER="192.168.1.X"   # IP del broker (default: localhost)
 export MQTT_PORT="1883"             # Puerto (default: 1883)
+export SERVIDOR_DIR="../servidor"   # Carpeta del backend Django (solo mqtt_client.py)
+export MQTT_USER / MQTT_PASSWORD    # Opcional
 ```
 
 ---
@@ -190,8 +217,8 @@ Para integrar con la plataforma Smart Campus, cada cocina publica
 en un topic con su ID único. La plataforma puede suscribirse a
 `cocinas/#` para recibir todas, o a `cocinas/cocina_N` para una sola.
 
-El campo `cocina_id` en el payload identifica la fuente del dato,
-permitiendo al dashboard distinguir entre múltiples cocinas simultáneas.
+La cocina se identifica por el topic (`cocinas/<id>`, solo letras, números, `_` y `-`, máx. 32): el firmware
+no envía `cocina_id` en el payload; el suscriptor lo agrega al guardar la lectura.
 
 ---
 

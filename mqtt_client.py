@@ -6,25 +6,18 @@ Autor: Cesar Daniel Ávila Barbosa
 Rol: escucha mensajes del ESP32 y cocinas virtuales,
      los valida y los persiste en la base de datos Django.
 
-Ejecutar desde Backend_cocina/:
-    source venv/bin/activate
-    python cocina/mqtt_client.py
+Ejecutar desde la carpeta mqtt/ con el entorno del backend (Django) activo:
+    SERVIDOR_DIR=../servidor python mqtt_client.py
+(La validación/conversión del payload vive en payload.py.)
 """
 
 import os
 import sys
-import json
 import logging
 import signal
-import django
 import paho.mqtt.client as mqtt
-from datetime import datetime
 
-# ── Setup Django ─────────────────────────────────────────────────
-os.environ.setdefault("DJANGO_SETTINGS_MODULE", "backend.settings")
-django.setup()
-
-from cocina.models import Lectura  # noqa: E402 — después del setup
+from payload import procesar_mensaje, validar_payload, ESTADO_POR_PRIORIDAD  # noqa: F401 (re-exportados)
 
 # ── Configuración ─────────────────────────────────────────────────
 BROKER      = os.getenv("MQTT_BROKER", "localhost")
@@ -32,6 +25,9 @@ PORT        = int(os.getenv("MQTT_PORT", "1883"))
 TOPIC       = "cocinas/#"          # recibe todas las cocinas
 CLIENT_ID   = "django_subscriber"
 KEEPALIVE   = 60
+# Carpeta del backend Django (repo "servidor"). Por defecto, hermana de esta carpeta.
+SERVIDOR_DIR = os.path.abspath(os.getenv(
+    "SERVIDOR_DIR", os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "servidor")))
 
 # ── Logging ───────────────────────────────────────────────────────
 logging.basicConfig(
@@ -41,43 +37,29 @@ logging.basicConfig(
 )
 log = logging.getLogger("mqtt_client")
 
-
-# ── Validación del payload ─────────────────────────────────────────
-CAMPOS_REQUERIDOS = {
-    "temperatura", "gas_raw", "presion_raw",
-    "llama", "prioridad", "v1_pct", "v2_pct", "v3_pct",
-}
-
-def validar_payload(data: dict) -> tuple[bool, str]:
-    """Valida que el payload tenga los campos mínimos y rangos correctos."""
-    faltantes = CAMPOS_REQUERIDOS - set(data.keys())
-    if faltantes:
-        return False, f"Campos faltantes: {faltantes}"
-
-    temp = data.get("temperatura", 0)
-    if not (-55 <= temp <= 155):
-        return False, f"Temperatura fuera de rango: {temp}"
-
-    prio = data.get("prioridad", 9)
-    if not (0 <= prio <= 9):
-        return False, f"Prioridad inválida: {prio}"
-
-    return True, "OK"
+_Lectura = None
 
 
-# ── Mapeo de prioridad a estado_sistema ───────────────────────────
-ESTADO_POR_PRIORIDAD = {
-    0: "CRITICA",
-    1: "EMERGENCIA_GAS",
-    2: "INCENDIO_SEVERO",
-    3: "INCENDIO_MODERADO",
-    4: "PREALERTA_GAS",
-    5: "PRESION_GAS",
-    6: "PRESION_ALTA",
-    7: "TEMP_ALTA",
-    8: "MONITOREO_LLAMA",
-    9: "NORMAL",
-}
+def _cargar_django():
+    """Inicializa Django la primera vez que se necesita (permite probar sin Django)."""
+    global _Lectura
+    if _Lectura is None:
+        if SERVIDOR_DIR not in sys.path:
+            sys.path.insert(0, SERVIDOR_DIR)
+        os.environ.setdefault("DJANGO_SETTINGS_MODULE", "backend.settings")
+        import django
+        django.setup()
+        from cocina.models import Lectura
+        _Lectura = Lectura
+    return _Lectura
+
+
+def guardar_lectura(campos: dict):
+    """Persiste una lectura. Cierra conexiones caducadas para sobrevivir a reinicios de la BD."""
+    Lectura = _cargar_django()
+    from django import db
+    db.close_old_connections()
+    return Lectura.objects.create(**campos)
 
 
 # ── Callbacks MQTT ────────────────────────────────────────────────
@@ -104,70 +86,33 @@ def on_disconnect(client, userdata, rc):
 
 
 def on_message(client, userdata, msg):
-    topic   = msg.topic
-    payload_str = msg.payload.decode("utf-8", errors="replace")
-
-    log.debug(f"Mensaje en {topic}: {payload_str[:120]}")
-
-    # ── Deserializar JSON ──────────────────────────────────────────
+    """Nunca propaga excepciones: un mensaje malformado no debe detener el suscriptor."""
     try:
-        data = json.loads(payload_str)
-    except json.JSONDecodeError as e:
-        log.warning(f"JSON inválido en {topic}: {e}")
-        return
+        campos, motivo = procesar_mensaje(msg.topic, msg.payload)
+        if campos is None:
+            log.warning(f"Mensaje rechazado ({msg.topic}): {motivo}")
+            return
 
-    # ── Validar ────────────────────────────────────────────────────
-    ok, motivo = validar_payload(data)
-    if not ok:
-        log.warning(f"Payload rechazado ({topic}): {motivo}")
-        return
+        estado, prio, cocina_id = campos["estado_sistema"], campos["prioridad"], campos["cocina_id"]
+        if not campos["sensor_ok"]:
+            log.warning(f"[{cocina_id}] sensor de temperatura con falla (sensor_ok=false)")
 
-    # ── Identificar cocina desde el topic ─────────────────────────
-    # Topic: cocinas/cocina_01 → cocina_id = "cocina_01"
-    partes    = topic.split("/")
-    cocina_id = partes[1] if len(partes) >= 2 else "desconocida"
-
-    # ── Construir objeto Lectura ───────────────────────────────────
-    prioridad    = int(data.get("prioridad", 9))
-    confirmando  = bool(data.get("confirmando", False))
-    estado       = ESTADO_POR_PRIORIDAD.get(prioridad, "NORMAL")
-
-    # Si está confirmando, el estado es informativo
-    if confirmando:
-        estado = f"VERIFICANDO_{estado}"
-
-    try:
-        lectura = Lectura.objects.create(
-            temperatura           = float(data["temperatura"]),
-            nivel_gas             = int(data["gas_raw"]),
-            presion               = float(data.get("presion_raw", 0)),
-            llama_detectada       = bool(data.get("llama", False)),
-            delta_t               = float(data.get("delta_t", 0.0)),
-            prioridad             = prioridad,
-            ventilador_inyeccion  = int(data.get("v1_pct", 0)),
-            ventilador_extraccion = int(data.get("v2_pct", 0)),
-            ventilador_emergencia = int(data.get("v3_pct", 0)),
-            valvula_cerrada       = bool(data.get("valvula", False)),
-            aspersor_activo       = bool(data.get("aspersor", False)),
-            estado_sistema        = estado,
-            cocina_id             = cocina_id,
-            ts_esp32              = int(data.get("ts", 0)),
-        )
+        lectura = guardar_lectura(campos)
         log.info(
-            f"[{cocina_id}] P{prioridad} T:{data['temperatura']:.1f}°C "
-            f"G:{data.get('gas_pct', '?')}% → guardado (id={lectura.id})"
+            f"[{cocina_id}] P{prio} T:{campos['temperatura']:.1f}°C "
+            f"G:{campos['gas_pct']}% → guardado (id={lectura.id})"
         )
-
-        # Alerta crítica en consola
-        if prioridad <= 1:
+        if prio <= 1:
             log.error(f"⚠  ALERTA CRÍTICA en {cocina_id}: {estado}")
-
-    except Exception as e:
-        log.error(f"Error guardando lectura de {topic}: {e}")
+    except Exception as e:  # incluye errores de BD
+        log.error(f"Error procesando mensaje de {msg.topic}: {type(e).__name__}: {e}")
 
 
 # ── Cliente MQTT ──────────────────────────────────────────────────
+# paho-mqtt 1.x (ver requirements.txt): la API cambió en 2.x
 client = mqtt.Client(client_id=CLIENT_ID, clean_session=True)
+if os.getenv("MQTT_USER"):
+    client.username_pw_set(os.getenv("MQTT_USER"), os.getenv("MQTT_PASSWORD", ""))
 client.on_connect    = on_connect
 client.on_disconnect = on_disconnect
 client.on_message    = on_message
@@ -189,9 +134,9 @@ if __name__ == "__main__":
     log.info(f"Iniciando suscriptor MQTT → {BROKER}:{PORT}")
     try:
         client.connect(BROKER, PORT, KEEPALIVE)
-    except ConnectionRefusedError:
+    except OSError as e:  # rechazo, host inalcanzable, DNS...
         log.error(
-            f"No se pudo conectar al broker en {BROKER}:{PORT}. "
+            f"No se pudo conectar al broker en {BROKER}:{PORT} ({e}). "
             "¿Está corriendo Mosquitto? → sudo systemctl start mosquitto"
         )
         sys.exit(1)

@@ -2,4 +2,5 @@
 # Instalar: pip install -r requirements.txt
 
 paho-mqtt==1.6.1        # Cliente MQTT para Python
-django>=4.2             # Ya instalado en el backend
+# Django: lo aporta el entorno del backend (servidor/requirements.txt), no se instala desde aquí
+# paho-mqtt 2.x cambió la API del cliente; este código usa la 1.x (fijada arriba)
