@@ -130,8 +130,8 @@ SERVIDOR_DIR=../servidor python mqtt_client.py
 
 Opcional: `MQTT_USER` / `MQTT_PASSWORD` si el broker exige autenticación (el firmware aún no la soporta).
 
-> **Estado:** el modelo `Lectura` de `servidor/` todavía no tiene los campos de este contrato (Fase 3 de la auditoría);
-> hasta entonces el suscriptor valida pero la escritura en BD fallará y quedará registrada en el log.
+> **Estado:** el modelo `Lectura` de `servidor/` (migración 0003) ya tiene los campos de este contrato; falta ejecutar
+> las pruebas del backend (`python manage.py test cocina`), que incluyen guardar exactamente el payload de este suscriptor.
 
 ### 4. Probar con el simulador
 
