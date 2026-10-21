@@ -194,6 +194,9 @@ cd pagina-web && npm run dev
 # Sin broker, sin paho y sin Django: contrato con el firmware real, mensajes malformados, simulador
 python -m unittest test_offline -v
 
+# Integración real MQTT → BD → alarma → API (sin broker; necesita las dependencias del servidor instaladas)
+python -m unittest test_integracion -v
+
 # Con broker Mosquitto en marcha (prueba el broker y la red, no el código del proyecto)
 python mqtt_test.py
 ```

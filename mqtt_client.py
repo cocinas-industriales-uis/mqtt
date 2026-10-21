@@ -62,6 +62,16 @@ def guardar_lectura(campos: dict):
     return Lectura.objects.create(**campos)
 
 
+def procesar_alarma(lectura):
+    """Abre/escala la alarma de la cocina (servidor/cocina/alarmas.py). Va aparte de guardar_lectura:
+    si falla, la lectura ya está guardada y el suscriptor sigue."""
+    _cargar_django()
+    from cocina import alarmas
+    from django import db
+    db.close_old_connections()
+    return alarmas.procesar_lectura(lectura)
+
+
 # ── Callbacks MQTT ────────────────────────────────────────────────
 def on_connect(client, userdata, flags, rc):
     codigos = {
@@ -104,6 +114,12 @@ def on_message(client, userdata, msg):
         )
         if prio <= 1:
             log.error(f"⚠  ALERTA CRÍTICA en {cocina_id}: {estado}")
+        try:
+            alarma = procesar_alarma(lectura)
+            if alarma is not None:
+                log.warning(f"[{cocina_id}] ALARMA #{alarma.id} P{alarma.prioridad} {alarma.tipo} ({alarma.estado})")
+        except Exception as e:       # la lectura ya está guardada
+            log.error(f"[{cocina_id}] no se pudo procesar la alarma: {type(e).__name__}: {e}")
     except Exception as e:  # incluye errores de BD
         log.error(f"Error procesando mensaje de {msg.topic}: {type(e).__name__}: {e}")
 

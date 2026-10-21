@@ -167,6 +167,24 @@ class CallbackOnMessage(unittest.TestCase):
         self.mc.guardar_lectura = falla
         self.mc.on_message(None, None, self.msg(TOPIC, firmware_payloads()[0]))   # no debe lanzar
 
+    def test_la_alarma_se_procesa_tras_guardar_y_su_fallo_no_detiene(self):
+        procesadas = []
+        self.mc.procesar_alarma = lambda l: procesadas.append(l.id)
+        self.mc.on_message(None, None, self.msg(TOPIC, firmware_payloads()[1]))
+        self.assertEqual(procesadas, [1])
+
+        def falla(l): raise RuntimeError("alarma")
+        self.mc.procesar_alarma = falla
+        self.mc.on_message(None, None, self.msg(TOPIC, firmware_payloads()[1]))   # no debe lanzar
+        self.assertEqual(len(self.guardadas), 2)                                  # la lectura sí se guardó
+
+    def test_si_no_se_guarda_no_se_procesa_alarma(self):
+        procesadas = []
+        self.mc.procesar_alarma = lambda l: procesadas.append(l)
+        self.mc.guardar_lectura = lambda campos: (_ for _ in ()).throw(RuntimeError("bd"))
+        self.mc.on_message(None, None, self.msg(TOPIC, firmware_payloads()[1]))
+        self.assertEqual(procesadas, [])
+
 
 if __name__ == "__main__":
     unittest.main()
