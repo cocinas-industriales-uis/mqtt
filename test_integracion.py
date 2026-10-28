@@ -128,6 +128,29 @@ class MqttABdYApi(unittest.TestCase):
         self.publicar("cocina_02", {**base, "prioridad": 3, "temperatura": 65.0, "llama": True, "confirmando": False})
         self.assertEqual(Alarma.objects.get().cocina_id, "cocina_02")
 
+    def test_stream_entrega_lectura_y_alarma_y_mide_latencia(self):
+        """MQTT → BD → stream: la lectura y la alarma salen por SSE en el primer sondeo tras publicarse.
+        La latencia total real = tiempo de procesar el mensaje (medido aquí) + hasta STREAM_POLL_S de sondeo."""
+        import json as _json
+        import time
+        from django.conf import settings
+        from cocina import stream
+        fuga = next(p for p in payloads() if p["prioridad"] == 1)
+        estado = stream.Estado()
+        t0 = time.perf_counter()
+        self.publicar("cocina_01", fuga)
+        t_proceso = time.perf_counter() - t0
+        eventos = stream.sondear(estado)
+        t_total = time.perf_counter() - t0
+        tipos = [e.split("\n", 1)[0] for e in eventos]
+        self.assertEqual(tipos, ["event: reading", "event: alarm"])
+        lectura = _json.loads(eventos[0].split("data: ", 1)[1])
+        self.assertEqual(lectura["cocina_id"], "cocina_01")
+        self.assertEqual(_json.loads(eventos[1].split("data: ", 1)[1])["estado"], "ACTIVA")
+        self.assertLess(t_total, 0.5)
+        print(f"\n[latencia] procesar mensaje (BD+alarma): {t_proceso*1000:.1f} ms; "
+              f"hasta el evento SSE: {t_total*1000:.1f} ms; peor caso por sondeo: +{settings.STREAM_POLL_S*1000:.0f} ms")
+
 
 if __name__ == "__main__":
     unittest.main()
